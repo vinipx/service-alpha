@@ -17,6 +17,11 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
           cache: maven
+      - name: Install common-library dependency
+        run: |
+          git clone https://github.com/vinipx/common-library.git /tmp/common-library
+          cd /tmp/common-library
+          mvn clean install -DskipTests -q
       - name: Build and Test
         run: mvn clean verify -DskipITs
       - name: Upload Coverage Report
