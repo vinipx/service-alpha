@@ -1,14 +1,15 @@
 name: Agentic SDLC (Implementation from merged plan)
 
-on:
+'on':
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - "docs/implementation-plans/*-plan.md"
+      - docs/implementation-plans/*-plan.md
   workflow_dispatch:
     inputs:
       jira_key:
-        description: "Jira key (e.g., AISDLC-1) for manual rerun/backfill"
+        description: Jira key (e.g., AISDLC-1) for manual rerun/backfill
         required: true
         type: string
 
@@ -37,9 +38,10 @@ jobs:
             SAFE_JIRA=$(echo "$JIRA_KEY" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
             PLAN_FILE="docs/implementation-plans/${SAFE_JIRA}-plan.md"
           else
-            PLAN_FILE=$(git diff-tree --no-commit-id --name-only -r "${{ github.sha }}" | grep -E '^docs/implementation-plans/.+-plan\.md$' | head -n 1 || true)
+            RANGE="${{ github.event.before }}..${{ github.sha }}"
+            PLAN_FILE=$(git diff --name-only "$RANGE" | grep -E '^docs/implementation-plans/.+-plan\.md$' | head -n 1 || true)
             if [ -z "${PLAN_FILE}" ]; then
-              echo "No *-plan.md file detected in commit. Exiting."
+              echo "No *-plan.md file detected in pushed range. Exiting."
               echo "should_run=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -122,7 +124,6 @@ jobs:
 
           mkdir -p docs/implementation-results
 
-          # Always write execution artifact
           cat > "docs/implementation-results/${SAFE}-implementation.md" << EOF
           # Implementation Result
 
@@ -131,51 +132,7 @@ jobs:
           Summary: ${{ steps.meta.outputs.summary }}
           Risk: ${{ steps.meta.outputs.risk }}
           Repository: ${REPO}
-
-          ## Status
-          Applied repository-aware starter changes for agentic pipeline validation.
           EOF
-
-          # Repo-specific deterministic code-touch markers (customize/replace with real implementation)
-          case "$REPO" in
-            common-library)
-              mkdir -p src/validation test/validation
-              cat > src/validation/email-validation-starter.txt << EOF
-              [${JIRA}] starter placeholder for shared email validation logic.
-              TODO: replace with real validator implementation and exports.
-              EOF
-              cat > test/validation/email-validation-starter.test.txt << EOF
-              [${JIRA}] starter placeholder tests for shared validation.
-              TODO: replace with executable unit tests.
-              EOF
-              ;;
-            service-alpha)
-              mkdir -p src/integration/email test/integration
-              cat > src/integration/email/validation-integration-starter.txt << EOF
-              [${JIRA}] starter placeholder to consume common-library validator in service-alpha request path.
-              TODO: wire into controller/service layer.
-              EOF
-              cat > test/integration/email/validation-integration-starter.test.txt << EOF
-              [${JIRA}] starter placeholder tests for service-alpha validator integration.
-              TODO: replace with executable tests.
-              EOF
-              ;;
-            service-beta)
-              mkdir -p src/integration/email test/integration
-              cat > src/integration/email/validation-integration-starter.txt << EOF
-              [${JIRA}] starter placeholder to consume common-library validator in service-beta processing flow.
-              TODO: wire into worker/processor path.
-              EOF
-              cat > test/integration/email/validation-integration-starter.test.txt << EOF
-              [${JIRA}] starter placeholder tests for service-beta validator integration.
-              TODO: replace with executable tests.
-              EOF
-              ;;
-            *)
-              mkdir -p docs
-              echo "[${JIRA}] generic starter change for ${REPO}" > "docs/${SAFE}-starter-change.txt"
-              ;;
-          esac
 
       - name: Mark plan as DONE
         if: steps.guard.outputs.already_done == 'false'
@@ -189,7 +146,6 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add -A
 
           if git diff --cached --quiet; then
@@ -212,36 +168,22 @@ jobs:
             const impacted = `${{ steps.meta.outputs.impacted }}`;
             const head = `${{ steps.ctx.outputs.impl_branch }}`;
 
-            const body = [
-              `Jira: ${jiraUrl}`,
-              ``,
-              `## Purpose`,
-              `Implementation flow triggered from merged plan artifact.`,
-              ``,
-              `## Story Summary`,
-              `${summary}`,
-              ``,
-              `## Metadata`,
-              `- Risk Level: ${risk}`,
-              `- Impacted Repositories: ${impacted}`,
-              ``,
-              `## Included`,
-              `- Plan file moved from \`*-plan.md\` to \`*-done.md\``,
-              `- Starter implementation files added for this repository`,
-              `- Starter test placeholders added`,
-              ``,
-              `> Next: replace starter placeholders with real production code + executable tests.`,
-              ``,
-              `@vinipxf please review.`
-            ].join("\n");
-
             const { data: pr } = await github.rest.pulls.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `[${jiraKey}] Implementation from merged plan`,
               head,
               base: "main",
-              body
+              body: [
+                `Jira: ${jiraUrl}`,
+                ``,
+                `## Story Summary`,
+                `${summary}`,
+                ``,
+                `## Metadata`,
+                `- Risk Level: ${risk}`,
+                `- Impacted Repositories: ${impacted}`
+              ].join("\n")
             });
 
             core.info(`Implementation PR created: ${pr.html_url}`);
