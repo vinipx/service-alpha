@@ -5,11 +5,11 @@ on:
     branches:
       - main
     paths:
-      - docs/implementation-plans/*-plan.md
+      - "docs/implementation-plans/*-plan.md"
   workflow_dispatch:
     inputs:
       jira_key:
-        description: Jira key (e.g., AISDLC-1) for manual rerun/backfill
+        description: "Jira key (e.g., AISDLC-1) for manual rerun/backfill"
         required: true
         type: string
 
