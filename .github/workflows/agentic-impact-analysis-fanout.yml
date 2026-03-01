@@ -12,19 +12,6 @@ on:
         required: false
         default: ""
         type: string
-      minimum_score:
-        description: "Minimum score threshold per repo for inclusion (default 2)"
-        required: false
-        default: "2"
-        type: string
-      fallback_mode:
-        description: "Fallback when no repo meets threshold: all | none"
-        required: false
-        default: "all"
-        type: choice
-        options:
-          - all
-          - none
 
 permissions:
   contents: write
