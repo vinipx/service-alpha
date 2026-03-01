@@ -1,0 +1,190 @@
+name: Agentic SDLC (Code Implementation from merged plan)
+# reindex: 2026-03-01
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/implementation-plans/*-plan.md"
+  workflow_dispatch:
+    inputs:
+      jira_key:
+        description: "Jira key (e.g., AISDLC-1) for manual rerun/backfill"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve plan context (push vs manual)
+        id: ctx
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            JIRA_KEY="${{ github.event.inputs.jira_key }}"
+            SAFE_JIRA=$(echo "$JIRA_KEY" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+            PLAN_FILE="docs/implementation-plans/${SAFE_JIRA}-plan.md"
+          else
+            RANGE="${{ github.event.before }}..${{ github.sha }}"
+            PLAN_FILE=$(git diff --name-only "$RANGE" | grep -E '^docs/implementation-plans/.+-plan\.md$' | head -n 1 || true)
+            if [ -z "${PLAN_FILE}" ]; then
+              echo "No *-plan.md file detected in pushed range. Exiting."
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            BASENAME=$(basename "${PLAN_FILE}")
+            SAFE_JIRA="${BASENAME%-plan.md}"
+            JIRA_KEY=$(echo "${SAFE_JIRA}" | tr '[:lower:]' '[:upper:]')
+          fi
+
+          DONE_FILE="docs/implementation-plans/${SAFE_JIRA}-done.md"
+          IMPL_BRANCH="agentic-impl/${SAFE_JIRA}-${{ github.run_id }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+
+          echo "jira_key=${JIRA_KEY}" >> "$GITHUB_OUTPUT"
+          echo "safe_jira=${SAFE_JIRA}" >> "$GITHUB_OUTPUT"
+          echo "plan_file=${PLAN_FILE}" >> "$GITHUB_OUTPUT"
+          echo "done_file=${DONE_FILE}" >> "$GITHUB_OUTPUT"
+          echo "impl_branch=${IMPL_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "repo_name=${REPO_NAME}" >> "$GITHUB_OUTPUT"
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when no run is needed
+        if: steps.ctx.outputs.should_run != 'true'
+        run: echo "Nothing to do."
+
+      - name: Ensure plan exists
+        if: steps.ctx.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          [ -f "${{ steps.ctx.outputs.plan_file }}" ] || {
+            echo "Plan file not found: ${{ steps.ctx.outputs.plan_file }}"
+            exit 1
+          }
+
+      - name: Idempotency guard (skip if already DONE)
+        if: steps.ctx.outputs.should_run == 'true'
+        id: guard
+        shell: bash
+        run: |
+          if [ -f "${{ steps.ctx.outputs.done_file }}" ]; then
+            echo "already_done=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop when already processed
+        if: steps.guard.outputs.already_done == 'true'
+        run: echo "Skipping: done marker already exists."
+
+      - name: Parse plan metadata
+        if: steps.guard.outputs.already_done == 'false'
+        id: meta
+        shell: bash
+        run: |
+          PLAN="${{ steps.ctx.outputs.plan_file }}"
+          JIRA_URL=$(grep -E '^- Jira URL:' "$PLAN" | sed -E 's/^- Jira URL:\s*//g' || true)
+          SUMMARY=$(grep -E '^- Story Summary:' "$PLAN" | sed -E 's/^- Story Summary:\s*//g' || true)
+          RISK=$(grep -E '^- Risk Level:' "$PLAN" | sed -E 's/^- Risk Level:\s*//g' || true)
+          IMPACTED=$(grep -E '^- Impacted Repositories:' "$PLAN" | sed -E 's/^- Impacted Repositories:\s*//g' || true)
+
+          [ -n "$JIRA_URL" ] || JIRA_URL="https://vinipxf.atlassian.net/browse/${{ steps.ctx.outputs.jira_key }}"
+
+          echo "jira_url=$JIRA_URL" >> "$GITHUB_OUTPUT"
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "risk=$RISK" >> "$GITHUB_OUTPUT"
+          echo "impacted=$IMPACTED" >> "$GITHUB_OUTPUT"
+
+      - name: Create implementation branch
+        if: steps.guard.outputs.already_done == 'false'
+        shell: bash
+        run: git checkout -b "${{ steps.ctx.outputs.impl_branch }}"
+
+      - name: Repo-aware starter implementation changes
+        if: steps.guard.outputs.already_done == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${{ steps.ctx.outputs.repo_name }}"
+          SAFE="${{ steps.ctx.outputs.safe_jira }}"
+          JIRA="${{ steps.ctx.outputs.jira_key }}"
+
+          mkdir -p docs/implementation-results
+
+          cat > "docs/implementation-results/${SAFE}-implementation.md" << EOF
+          # Implementation Result
+
+          Jira Key: ${JIRA}
+          Jira URL: ${{ steps.meta.outputs.jira_url }}
+          Summary: ${{ steps.meta.outputs.summary }}
+          Risk: ${{ steps.meta.outputs.risk }}
+          Repository: ${REPO}
+          EOF
+
+      - name: Mark plan as DONE
+        if: steps.guard.outputs.already_done == 'false'
+        shell: bash
+        run: mv "${{ steps.ctx.outputs.plan_file }}" "${{ steps.ctx.outputs.done_file }}"
+
+      - name: Commit and push
+        if: steps.guard.outputs.already_done == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "feat(impl): starter implementation for ${{ steps.ctx.outputs.jira_key }}"
+          git push --set-upstream origin "${{ steps.ctx.outputs.impl_branch }}"
+
+      - name: Open implementation PR
+        if: steps.guard.outputs.already_done == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jiraKey = `${{ steps.ctx.outputs.jira_key }}`;
+            const jiraUrl = `${{ steps.meta.outputs.jira_url }}` || `https://vinipxf.atlassian.net/browse/${jiraKey}`;
+            const summary = `${{ steps.meta.outputs.summary }}`;
+            const risk = `${{ steps.meta.outputs.risk }}`;
+            const impacted = `${{ steps.meta.outputs.impacted }}`;
+            const head = `${{ steps.ctx.outputs.impl_branch }}`;
+
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[${jiraKey}] Implementation from merged plan`,
+              head,
+              base: "main",
+              body: [
+                `Jira: ${jiraUrl}`,
+                ``,
+                `## Story Summary`,
+                `${summary}`,
+                ``,
+                `## Metadata`,
+                `- Risk Level: ${risk}`,
+                `- Impacted Repositories: ${impacted}`
+              ].join("\n")
+            });
+
+            core.info(`Implementation PR created: ${pr.html_url}`);
