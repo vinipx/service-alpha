@@ -1,0 +1,59 @@
+name: Agentic SDLC Fan-out (Dispatch impacted repos)
+
+on:
+  workflow_dispatch:
+    inputs:
+      jira_key:
+        description: "Jira key (e.g., AISDLC-1)"
+        required: true
+        type: string
+      impacted_repositories:
+        description: "Comma-separated list (service-alpha,service-beta,common-library)"
+        required: true
+        default: "service-alpha,service-beta,common-library"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse and dispatch to impacted repos
+        uses: actions/github-script@v7
+        env:
+          JIRA_KEY: ${{ github.event.inputs.jira_key }}
+          IMPACTED: ${{ github.event.inputs.impacted_repositories }}
+          OWNER: vinipx
+        with:
+          # IMPORTANT:
+          # 1) Create secret ORG_DISPATCH_TOKEN (fine-grained PAT)
+          # 2) Token needs access to all target repos + actions write
+          github-token: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          script: |
+            const jiraKey = process.env.JIRA_KEY;
+            const owner = process.env.OWNER;
+            const impacted = process.env.IMPACTED
+              .split(",")
+              .map(s => s.trim())
+              .filter(Boolean);
+
+            core.info(`Jira key: ${jiraKey}`);
+            core.info(`Impacted repos: ${impacted.join(", ")}`);
+
+            // Dispatch event to each impacted repo
+            for (const repo of impacted) {
+              core.info(`Dispatching to ${owner}/${repo}...`);
+              await github.rest.repos.createDispatchEvent({
+                owner,
+                repo,
+                event_type: "agentic_sdlc_run",
+                client_payload: {
+                  jira_key: jiraKey,
+                  impacted_repositories: impacted.join(",")
+                }
+              });
+            }
+
+            core.info("Fan-out dispatch completed.");
