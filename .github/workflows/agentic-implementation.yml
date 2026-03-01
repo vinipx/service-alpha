@@ -1,4 +1,4 @@
-name: Agentic SDLC (Implementation from merged plan)
+name: Agentic SDLC (Implementation from merged plan) v2
 
 on:
   push:
@@ -37,7 +37,6 @@ jobs:
             SAFE_JIRA=$(echo "$JIRA_KEY" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
             PLAN_FILE="docs/implementation-plans/${SAFE_JIRA}-plan.md"
           else
-            # Find plan file from the push commit diff
             PLAN_FILE=$(git diff-tree --no-commit-id --name-only -r "${{ github.sha }}" | grep -E '^docs/implementation-plans/.+-plan\.md$' | head -n 1 || true)
             if [ -z "${PLAN_FILE}" ]; then
               echo "No *-plan.md file detected in commit. Exiting."
@@ -51,19 +50,21 @@ jobs:
 
           DONE_FILE="docs/implementation-plans/${SAFE_JIRA}-done.md"
           IMPL_BRANCH="agentic-impl/${SAFE_JIRA}-${{ github.run_id }}"
+          REPO_NAME="${{ github.event.repository.name }}"
 
           echo "jira_key=${JIRA_KEY}" >> "$GITHUB_OUTPUT"
           echo "safe_jira=${SAFE_JIRA}" >> "$GITHUB_OUTPUT"
           echo "plan_file=${PLAN_FILE}" >> "$GITHUB_OUTPUT"
           echo "done_file=${DONE_FILE}" >> "$GITHUB_OUTPUT"
           echo "impl_branch=${IMPL_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "repo_name=${REPO_NAME}" >> "$GITHUB_OUTPUT"
           echo "should_run=true" >> "$GITHUB_OUTPUT"
 
-      - name: Skip when no run is needed
+      - name: Stop when no run is needed
         if: steps.ctx.outputs.should_run != 'true'
         run: echo "Nothing to do."
 
-      - name: Ensure plan file exists
+      - name: Ensure plan exists
         if: steps.ctx.outputs.should_run == 'true'
         shell: bash
         run: |
@@ -78,7 +79,6 @@ jobs:
         shell: bash
         run: |
           if [ -f "${{ steps.ctx.outputs.done_file }}" ]; then
-            echo "This Jira plan was already processed: ${{ steps.ctx.outputs.done_file }}"
             echo "already_done=true" >> "$GITHUB_OUTPUT"
           else
             echo "already_done=false" >> "$GITHUB_OUTPUT"
@@ -86,13 +86,7 @@ jobs:
 
       - name: Stop when already processed
         if: steps.guard.outputs.already_done == 'true'
-        run: echo "Skipping implementation (already processed)."
-
-      - name: Create implementation branch
-        if: steps.guard.outputs.already_done == 'false'
-        shell: bash
-        run: |
-          git checkout -b "${{ steps.ctx.outputs.impl_branch }}"
+        run: echo "Skipping: done marker already exists."
 
       - name: Parse plan metadata
         if: steps.guard.outputs.already_done == 'false'
@@ -105,53 +99,105 @@ jobs:
           RISK=$(grep -E '^- Risk Level:' "$PLAN" | sed -E 's/^- Risk Level:\s*//g' || true)
           IMPACTED=$(grep -E '^- Impacted Repositories:' "$PLAN" | sed -E 's/^- Impacted Repositories:\s*//g' || true)
 
-          if [ -z "$JIRA_URL" ]; then
-            JIRA_URL="https://vinipxf.atlassian.net/browse/${{ steps.ctx.outputs.jira_key }}"
-          fi
+          [ -n "$JIRA_URL" ] || JIRA_URL="https://vinipxf.atlassian.net/browse/${{ steps.ctx.outputs.jira_key }}"
 
           echo "jira_url=$JIRA_URL" >> "$GITHUB_OUTPUT"
           echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
           echo "risk=$RISK" >> "$GITHUB_OUTPUT"
           echo "impacted=$IMPACTED" >> "$GITHUB_OUTPUT"
 
-      - name: Placeholder implementation (replace with real agentic code step)
+      - name: Create implementation branch
+        if: steps.guard.outputs.already_done == 'false'
+        shell: bash
+        run: git checkout -b "${{ steps.ctx.outputs.impl_branch }}"
+
+      - name: Repo-aware starter implementation changes
         if: steps.guard.outputs.already_done == 'false'
         shell: bash
         run: |
-          mkdir -p docs/implementation-results
-          cat > "docs/implementation-results/${{ steps.ctx.outputs.safe_jira }}-implementation.md" << EOF
-          # Implementation Result (Scaffold)
+          set -euo pipefail
+          REPO="${{ steps.ctx.outputs.repo_name }}"
+          SAFE="${{ steps.ctx.outputs.safe_jira }}"
+          JIRA="${{ steps.ctx.outputs.jira_key }}"
 
-          Jira Key: ${{ steps.ctx.outputs.jira_key }}
+          mkdir -p docs/implementation-results
+
+          # Always write execution artifact
+          cat > "docs/implementation-results/${SAFE}-implementation.md" << EOF
+          # Implementation Result
+
+          Jira Key: ${JIRA}
           Jira URL: ${{ steps.meta.outputs.jira_url }}
           Summary: ${{ steps.meta.outputs.summary }}
           Risk: ${{ steps.meta.outputs.risk }}
+          Repository: ${REPO}
 
-          This is a scaffold result file.
-          Replace this step with your coding-agent invocation or repository-specific implementation scripts.
+          ## Status
+          Applied repository-aware starter changes for agentic pipeline validation.
           EOF
 
-      - name: Mark plan as DONE (prevents retrigger/reprocessing)
-        if: steps.guard.outputs.already_done == 'false'
-        shell: bash
-        run: |
-          mv "${{ steps.ctx.outputs.plan_file }}" "${{ steps.ctx.outputs.done_file }}"
+          # Repo-specific deterministic code-touch markers (customize/replace with real implementation)
+          case "$REPO" in
+            common-library)
+              mkdir -p src/validation test/validation
+              cat > src/validation/email-validation-starter.txt << EOF
+              [${JIRA}] starter placeholder for shared email validation logic.
+              TODO: replace with real validator implementation and exports.
+              EOF
+              cat > test/validation/email-validation-starter.test.txt << EOF
+              [${JIRA}] starter placeholder tests for shared validation.
+              TODO: replace with executable unit tests.
+              EOF
+              ;;
+            service-alpha)
+              mkdir -p src/integration/email test/integration
+              cat > src/integration/email/validation-integration-starter.txt << EOF
+              [${JIRA}] starter placeholder to consume common-library validator in service-alpha request path.
+              TODO: wire into controller/service layer.
+              EOF
+              cat > test/integration/email/validation-integration-starter.test.txt << EOF
+              [${JIRA}] starter placeholder tests for service-alpha validator integration.
+              TODO: replace with executable tests.
+              EOF
+              ;;
+            service-beta)
+              mkdir -p src/integration/email test/integration
+              cat > src/integration/email/validation-integration-starter.txt << EOF
+              [${JIRA}] starter placeholder to consume common-library validator in service-beta processing flow.
+              TODO: wire into worker/processor path.
+              EOF
+              cat > test/integration/email/validation-integration-starter.test.txt << EOF
+              [${JIRA}] starter placeholder tests for service-beta validator integration.
+              TODO: replace with executable tests.
+              EOF
+              ;;
+            *)
+              mkdir -p docs
+              echo "[${JIRA}] generic starter change for ${REPO}" > "docs/${SAFE}-starter-change.txt"
+              ;;
+          esac
 
-      - name: Commit and push implementation branch
+      - name: Mark plan as DONE
+        if: steps.guard.outputs.already_done == 'false'
+        shell: bash
+        run: mv "${{ steps.ctx.outputs.plan_file }}" "${{ steps.ctx.outputs.done_file }}"
+
+      - name: Commit and push
         if: steps.guard.outputs.already_done == 'false'
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add "${{ steps.ctx.outputs.done_file }}" "docs/implementation-results/${{ steps.ctx.outputs.safe_jira }}-implementation.md"
+          git add -A
 
           if git diff --cached --quiet; then
-            echo "No changes detected; skipping commit."
+            echo "No changes to commit."
             exit 0
           fi
 
-          git commit -m "feat(impl): execute implementation scaffold for ${{ steps.ctx.outputs.jira_key }}"
+          git commit -m "feat(impl): starter implementation for ${{ steps.ctx.outputs.jira_key }}"
           git push --set-upstream origin "${{ steps.ctx.outputs.impl_branch }}"
 
       - name: Open implementation PR
@@ -179,11 +225,12 @@ jobs:
               `- Risk Level: ${risk}`,
               `- Impacted Repositories: ${impacted}`,
               ``,
-              `## Included in this PR`,
-              `- Plan marker transitioned from \`*-plan.md\` to \`*-done.md\``,
-              `- Implementation scaffold artifact generated`,
+              `## Included`,
+              `- Plan file moved from \`*-plan.md\` to \`*-done.md\``,
+              `- Starter implementation files added for this repository`,
+              `- Starter test placeholders added`,
               ``,
-              `> Replace scaffold step with real code implementation logic (agent/script) for production use.`,
+              `> Next: replace starter placeholders with real production code + executable tests.`,
               ``,
               `@vinipxf please review.`
             ].join("\n");
