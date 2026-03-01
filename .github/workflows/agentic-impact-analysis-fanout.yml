@@ -1,0 +1,252 @@
+name: Agentic SDLC (Impact Analysis + Fan-out)
+
+on:
+  workflow_dispatch:
+    inputs:
+      jira_key:
+        description: "Jira key (e.g., AISDLC-1)"
+        required: true
+        type: string
+      override_impacted_repositories:
+        description: "Optional override (comma-separated). Leave empty for auto-analysis."
+        required: false
+        default: ""
+        type: string
+      minimum_score:
+        description: "Minimum score threshold per repo for inclusion (default 2)"
+        required: false
+        default: "2"
+        type: string
+      fallback_mode:
+        description: "Fallback when no repo meets threshold: all | none"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - none
+
+permissions:
+  contents: write
+
+jobs:
+  analyze-and-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout orchestrator repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          [ -n "${{ secrets.JIRA_BASE_URL }}" ] || (echo "Missing secret: JIRA_BASE_URL" && exit 1)
+          [ -n "${{ secrets.JIRA_EMAIL }}" ] || (echo "Missing secret: JIRA_EMAIL" && exit 1)
+          [ -n "${{ secrets.JIRA_API_TOKEN }}" ] || (echo "Missing secret: JIRA_API_TOKEN" && exit 1)
+          [ -n "${{ secrets.ORG_DISPATCH_TOKEN }}" ] || (echo "Missing secret: ORG_DISPATCH_TOKEN" && exit 1)
+
+      - name: Fetch Jira issue
+        id: jira
+        shell: bash
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_KEY: ${{ github.event.inputs.jira_key }}
+        run: |
+          set -euo pipefail
+          API_URL="${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_KEY}?fields=summary,description,labels,issuetype,priority,status"
+          RESPONSE=$(curl -sS -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" -H "Accept: application/json" "$API_URL")
+
+          echo "$RESPONSE" | jq -e '.key' >/dev/null || {
+            echo "Failed to fetch Jira issue:"
+            echo "$RESPONSE"
+            exit 1
+          }
+
+          KEY=$(echo "$RESPONSE" | jq -r '.key')
+          SUMMARY=$(echo "$RESPONSE" | jq -r '.fields.summary // ""')
+          LABELS=$(echo "$RESPONSE" | jq -r '.fields.labels // [] | join(",")')
+          ISSUE_TYPE=$(echo "$RESPONSE" | jq -r '.fields.issuetype.name // ""')
+          PRIORITY=$(echo "$RESPONSE" | jq -r '.fields.priority.name // ""')
+          STATUS=$(echo "$RESPONSE" | jq -r '.fields.status.name // ""')
+
+          # Flatten Atlassian document format (best effort)
+          DESCRIPTION=$(echo "$RESPONSE" | jq -r '
+            .fields.description.content // [] |
+            map(.content // []) | flatten |
+            map(.text // empty) | join(" ")
+          ')
+
+          FULL_TEXT="${SUMMARY} ${DESCRIPTION}"
+
+          echo "jira_key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "jira_summary<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "jira_full_text<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FULL_TEXT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "jira_labels=$LABELS" >> "$GITHUB_OUTPUT"
+          echo "jira_issue_type=$ISSUE_TYPE" >> "$GITHUB_OUTPUT"
+          echo "jira_priority=$PRIORITY" >> "$GITHUB_OUTPUT"
+          echo "jira_status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "jira_url=${JIRA_BASE_URL}/browse/${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Guardrails
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISSUE_TYPE="${{ steps.jira.outputs.jira_issue_type }}"
+          LABELS="${{ steps.jira.outputs.jira_labels }}"
+
+          [ "$ISSUE_TYPE" = "Story" ] || (echo "Only Story allowed. Got: $ISSUE_TYPE" && exit 1)
+          echo "$LABELS" | grep -qi "agentic-sdlc" || (echo "Missing required label: agentic-sdlc" && exit 1)
+
+      - name: Auto impact analysis (heuristics + evidence)
+        id: impact
+        shell: bash
+        env:
+          TEXT: ${{ steps.jira.outputs.jira_full_text }}
+          SUMMARY: ${{ steps.jira.outputs.jira_summary }}
+          OVERRIDE: ${{ github.event.inputs.override_impacted_repositories }}
+          MIN_SCORE: ${{ github.event.inputs.minimum_score }}
+          FALLBACK_MODE: ${{ github.event.inputs.fallback_mode }}
+        run: |
+          set -euo pipefail
+
+          # Candidate repos
+          REPOS=("service-alpha" "service-beta" "common-library")
+          SCORE_service_alpha=0
+          SCORE_service_beta=0
+          SCORE_common_library=0
+
+          lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+          TXT=$(lower "$TEXT $SUMMARY")
+
+          # Keyword scoring (customize as needed)
+          # common-library signals
+          echo "$TXT" | grep -Eqi 'common[-_ ]library|shared|common util|cross[- ]service|reusable|validator|validation library' && SCORE_common_library=$((SCORE_common_library+3))
+          echo "$TXT" | grep -Eqi 'email|regex|format|normalize|sanitize|domain|address' && SCORE_common_library=$((SCORE_common_library+1))
+
+          # service-alpha signals
+          echo "$TXT" | grep -Eqi 'service[-_ ]alpha|alpha api|alpha service|producer|upstream' && SCORE_service_alpha=$((SCORE_service_alpha+3))
+          echo "$TXT" | grep -Eqi 'controller|endpoint|request|http|rest|ingress' && SCORE_service_alpha=$((SCORE_service_alpha+1))
+
+          # service-beta signals
+          echo "$TXT" | grep -Eqi 'service[-_ ]beta|beta service|consumer|downstream' && SCORE_service_beta=$((SCORE_service_beta+3))
+          echo "$TXT" | grep -Eqi 'processor|worker|event|message|queue' && SCORE_service_beta=$((SCORE_service_beta+1))
+
+          # Cross-service signal should include both services
+          echo "$TXT" | grep -Eqi 'cross[- ]service|all services|both services|multi[- ]repo' && {
+            SCORE_service_alpha=$((SCORE_service_alpha+2))
+            SCORE_service_beta=$((SCORE_service_beta+2))
+            SCORE_common_library=$((SCORE_common_library+2))
+          }
+
+          # Manual override
+          if [ -n "$OVERRIDE" ]; then
+            IMPACTED="$OVERRIDE"
+            MODE="manual_override"
+          else
+            MODE="auto"
+            MIN=${MIN_SCORE:-2}
+            OUT=()
+
+            [ "$SCORE_service_alpha" -ge "$MIN" ] && OUT+=("service-alpha")
+            [ "$SCORE_service_beta" -ge "$MIN" ] && OUT+=("service-beta")
+            [ "$SCORE_common_library" -ge "$MIN" ] && OUT+=("common-library")
+
+            if [ "${#OUT[@]}" -eq 0 ]; then
+              if [ "${FALLBACK_MODE}" = "all" ]; then
+                OUT=("service-alpha" "service-beta" "common-library")
+              else
+                OUT=()
+              fi
+            fi
+
+            IMPACTED=$(IFS=, ; echo "${OUT[*]}")
+          fi
+
+          echo "analysis_mode=${MODE}" >> "$GITHUB_OUTPUT"
+          echo "impacted_repositories=${IMPACTED}" >> "$GITHUB_OUTPUT"
+          echo "score_service_alpha=${SCORE_service_alpha}" >> "$GITHUB_OUTPUT"
+          echo "score_service_beta=${SCORE_service_beta}" >> "$GITHUB_OUTPUT"
+          echo "score_common_library=${SCORE_common_library}" >> "$GITHUB_OUTPUT"
+
+      - name: Persist impact-analysis artifact in repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/impact-analysis
+          SAFE_JIRA=$(echo "${{ steps.jira.outputs.jira_key }}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+          FILE="docs/impact-analysis/${SAFE_JIRA}-impact.json"
+
+          cat > "$FILE" << EOF
+          {
+            "jira_key": "${{ steps.jira.outputs.jira_key }}",
+            "jira_url": "${{ steps.jira.outputs.jira_url }}",
+            "summary": $(jq -Rn --arg v "${{ steps.jira.outputs.jira_summary }}" '$v'),
+            "analysis_mode": "${{ steps.impact.outputs.analysis_mode }}",
+            "scores": {
+              "service-alpha": ${{ steps.impact.outputs.score_service_alpha }},
+              "service-beta": ${{ steps.impact.outputs.score_service_beta }},
+              "common-library": ${{ steps.impact.outputs.score_common_library }}
+            },
+            "selected_repositories": [$(echo "${{ steps.impact.outputs.impacted_repositories }}" | awk -F',' '{for(i=1;i<=NF;i++) printf "\"%s\"%s",$i,(i<NF?",":"")}')],
+            "timestamp_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+          if git diff --cached --quiet; then
+            echo "No impact artifact changes to commit."
+          else
+            git commit -m "chore(impact): analysis for ${{ steps.jira.outputs.jira_key }}"
+            git push origin main
+          fi
+
+      - name: Dispatch to selected repositories
+        uses: actions/github-script@v7
+        env:
+          OWNER: vinipx
+          JIRA_KEY: ${{ steps.jira.outputs.jira_key }}
+          IMPACTED: ${{ steps.impact.outputs.impacted_repositories }}
+        with:
+          github-token: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          script: |
+            const owner = process.env.OWNER;
+            const jiraKey = process.env.JIRA_KEY;
+            const impactedRaw = process.env.IMPACTED || "";
+            const impacted = impactedRaw.split(",").map(s => s.trim()).filter(Boolean);
+
+            if (impacted.length === 0) {
+              core.warning("No impacted repositories selected. No dispatch sent.");
+              return;
+            }
+
+            core.info(`Dispatching Jira ${jiraKey} to: ${impacted.join(", ")}`);
+
+            for (const repo of impacted) {
+              await github.rest.repos.createDispatchEvent({
+                owner,
+                repo,
+                event_type: "agentic_sdlc_run",
+                client_payload: {
+                  jira_key: jiraKey,
+                  impacted_repositories: impacted.join(",")
+                }
+              });
+              core.info(`Dispatched to ${owner}/${repo}`);
+            }
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "Jira Key: ${{ steps.jira.outputs.jira_key }}"
+          echo "Jira URL: ${{ steps.jira.outputs.jira_url }}"
+          echo "Selected repos: ${{ steps.impact.outputs.impacted_repositories }}"
+          echo "Scores -> alpha: ${{ steps.impact.outputs.score_service_alpha }}, beta: ${{ steps.impact.outputs.score_service_beta }}, common: ${{ steps.impact.outputs.score_common_library }}"
