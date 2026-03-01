@@ -1,6 +1,6 @@
 name: Agentic SDLC (Implementation from merged plan)
 
-'on':
+on:
   push:
     branches:
       - main
