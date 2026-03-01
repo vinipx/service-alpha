@@ -1,33 +1,17 @@
-name: Agentic SDLC (Manual Trigger)
+name: Agentic SDLC (Manual Trigger + Jira Auto-Fetch)
 
 on:
   workflow_dispatch:
     inputs:
       jira_key:
-        description: "Jira key (e.g., PROJ-123)"
-        required: true
-        type: string
-      jira_url:
-        description: "Jira issue URL"
-        required: true
-        type: string
-      story_summary:
-        description: "Short summary of the story"
+        description: "Jira key (e.g., AISDLC-1)"
         required: true
         type: string
       impacted_repositories:
         description: "Comma-separated list (service-alpha,service-beta,common-library)"
         required: true
+        default: "service-alpha,service-beta,common-library"
         type: string
-      risk_level:
-        description: "Risk level"
-        required: true
-        default: "medium"
-        type: choice
-        options:
-          - low
-          - medium
-          - high
 
 permissions:
   contents: write
@@ -40,13 +24,26 @@ jobs:
     outputs:
       branch_name: ${{ steps.vars.outputs.branch_name }}
       plan_file: ${{ steps.vars.outputs.plan_file }}
+      jira_url: ${{ steps.jira.outputs.jira_url }}
+      story_summary: ${{ steps.jira.outputs.story_summary }}
+      risk_level: ${{ steps.jira.outputs.risk_level }}
+      issue_type: ${{ steps.jira.outputs.issue_type }}
+      labels: ${{ steps.jira.outputs.labels }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up variables
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          [ -n "${{ secrets.JIRA_BASE_URL }}" ] || (echo "Missing secret: JIRA_BASE_URL" && exit 1)
+          [ -n "${{ secrets.JIRA_EMAIL }}" ] || (echo "Missing secret: JIRA_EMAIL" && exit 1)
+          [ -n "${{ secrets.JIRA_API_TOKEN }}" ] || (echo "Missing secret: JIRA_API_TOKEN" && exit 1)
+
+      - name: Build branch/paths
         id: vars
+        shell: bash
         run: |
           SAFE_JIRA=$(echo "${{ github.event.inputs.jira_key }}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
           BRANCH="agentic/${SAFE_JIRA}"
@@ -54,17 +51,81 @@ jobs:
           echo "branch_name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "plan_file=${PLAN_FILE}" >> "$GITHUB_OUTPUT"
 
+      - name: Fetch Jira issue details
+        id: jira
+        shell: bash
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_KEY: ${{ github.event.inputs.jira_key }}
+        run: |
+          API_URL="${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_KEY}?fields=summary,issuetype,priority,labels,status"
+
+          RESPONSE=$(curl -sS -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" \
+            -H "Accept: application/json" \
+            "$API_URL")
+
+          # Basic validation
+          echo "$RESPONSE" | jq -e '.key' >/dev/null || {
+            echo "Failed to fetch Jira issue. Response:"
+            echo "$RESPONSE"
+            exit 1
+          }
+
+          KEY=$(echo "$RESPONSE" | jq -r '.key')
+          SUMMARY=$(echo "$RESPONSE" | jq -r '.fields.summary // "N/A"')
+          ISSUE_TYPE=$(echo "$RESPONSE" | jq -r '.fields.issuetype.name // "Unknown"')
+          PRIORITY=$(echo "$RESPONSE" | jq -r '.fields.priority.name // "medium"')
+          LABELS=$(echo "$RESPONSE" | jq -r '.fields.labels // [] | join(",")')
+
+          # Normalize risk level from Jira priority
+          PRIORITY_LC=$(echo "$PRIORITY" | tr '[:upper:]' '[:lower:]')
+          case "$PRIORITY_LC" in
+            highest|high|critical|blocker) RISK="high" ;;
+            medium|normal) RISK="medium" ;;
+            low|lowest|minor|trivial) RISK="low" ;;
+            *) RISK="medium" ;;
+          esac
+
+          JIRA_URL="${JIRA_BASE_URL}/browse/${KEY}"
+
+          echo "jira_url=${JIRA_URL}" >> "$GITHUB_OUTPUT"
+          echo "story_summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
+          echo "risk_level=${RISK}" >> "$GITHUB_OUTPUT"
+          echo "issue_type=${ISSUE_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "labels=${LABELS}" >> "$GITHUB_OUTPUT"
+
+      - name: Guardrails
+        shell: bash
+        run: |
+          ISSUE_TYPE="${{ steps.jira.outputs.issue_type }}"
+          LABELS="${{ steps.jira.outputs.labels }}"
+
+          # Enforce Story only
+          if [ "$ISSUE_TYPE" != "Story" ]; then
+            echo "Issue type is '$ISSUE_TYPE'. Only 'Story' is allowed."
+            exit 1
+          fi
+
+          # Require agentic-sdlc label
+          echo "$LABELS" | grep -qi "agentic-sdlc" || {
+            echo "Missing required Jira label: agentic-sdlc"
+            exit 1
+          }
+
       - name: Create implementation plan artifact
+        shell: bash
         run: |
           mkdir -p docs/implementation-plans
-          cat > "${{ steps.vars.outputs.plan_file }}" << 'EOF'
+          cat > "${{ steps.vars.outputs.plan_file }}" << EOF
           # Implementation Plan
 
           - Jira Key: ${{ github.event.inputs.jira_key }}
-          - Jira URL: ${{ github.event.inputs.jira_url }}
-          - Story Summary: ${{ github.event.inputs.story_summary }}
+          - Jira URL: ${{ steps.jira.outputs.jira_url }}
+          - Story Summary: ${{ steps.jira.outputs.story_summary }}
           - Impacted Repositories: ${{ github.event.inputs.impacted_repositories }}
-          - Risk Level: ${{ github.event.inputs.risk_level }}
+          - Risk Level: ${{ steps.jira.outputs.risk_level }}
 
           ## Planned Steps
           1. Ingest requirement from Jira
@@ -73,12 +134,14 @@ jobs:
           4. Add/update unit and integration tests
           5. Open PR and request CODEOWNERS review
 
-          ## Notes
-          - This is an automation scaffold.
-          - Replace/extend with real Jira API + coding agent integrations as needed.
+          ## Governance
+          - Follow .github/copilot-instructions.md
+          - Follow java-coding-guidelines.md
+          - Ensure CI and required checks pass
           EOF
 
       - name: Commit plan to feature branch
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -95,9 +158,12 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const branch = "${{ needs.plan.outputs.branch_name }}";
-            const jiraKey = "${{ github.event.inputs.jira_key }}";
-            const jiraUrl = "${{ github.event.inputs.jira_url }}";
+            const jiraKey = `${{ github.event.inputs.jira_key }}`;
+            const jiraUrl = `${{ needs.plan.outputs.jira_url }}`;
+            const storySummary = `${{ needs.plan.outputs.story_summary }}`;
+            const riskLevel = `${{ needs.plan.outputs.risk_level }}`;
+            const impacted = `${{ github.event.inputs.impacted_repositories }}`;
+            const branch = `${{ needs.plan.outputs.branch_name }}`;
 
             const { data: pr } = await github.rest.pulls.create({
               owner: context.repo.owner,
@@ -108,9 +174,14 @@ jobs:
               body: [
                 `Jira: ${jiraUrl}`,
                 ``,
-                `This PR was generated by the Agentic SDLC workflow scaffold.`,
-                `It adds a structured implementation plan artifact and prepares the repository for agent-driven execution.`,
+                `## Story Summary`,
+                `${storySummary}`,
                 ``,
+                `## Metadata`,
+                `- Risk Level: ${riskLevel}`,
+                `- Impacted Repositories: ${impacted}`,
+                ``,
+                `This PR was generated by the Agentic SDLC workflow with Jira auto-fetch.`,
                 `@vinipxf please review (CODEOWNERS should also auto-request review).`
               ].join("\n")
             });
