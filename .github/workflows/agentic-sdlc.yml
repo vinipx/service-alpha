@@ -147,8 +147,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "${{ steps.vars.outputs.branch_name }}"
           git add "${{ steps.vars.outputs.plan_file }}"
-          git commit -m "chore(plan): add implementation plan for ${{ github.event.inputs.jira_key }}"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(plan): add implementation plan for ${{ github.event.inputs.jira_key }}"
           git push --set-upstream origin "${{ steps.vars.outputs.branch_name }}"
+          fi
 
   pr:
     runs-on: ubuntu-latest
