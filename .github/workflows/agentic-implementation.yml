@@ -89,20 +89,22 @@ jobs:
 
       - name: Stop when already processed
         if: steps.guard.outputs.already_done == 'true'
-        run: echo "Skipping: done marker already exists."
+        run: "echo 'Skipping: done marker already exists.'"
 
       - name: Parse plan metadata
-        if: steps.guard.outputs.already_done == 'false'
+        if: ${{ steps.guard.outputs.already_done == 'false' }}
         id: meta
         shell: bash
         run: |
           PLAN="${{ steps.ctx.outputs.plan_file }}"
-          JIRA_URL=$(grep -E '^- Jira URL:' "$PLAN" | sed -E 's/^- Jira URL:\s*//g' || true)
-          SUMMARY=$(grep -E '^- Story Summary:' "$PLAN" | sed -E 's/^- Story Summary:\s*//g' || true)
-          RISK=$(grep -E '^- Risk Level:' "$PLAN" | sed -E 's/^- Risk Level:\s*//g' || true)
-          IMPACTED=$(grep -E '^- Impacted Repositories:' "$PLAN" | sed -E 's/^- Impacted Repositories:\s*//g' || true)
+          JIRA_URL="$(grep -E '^- Jira URL:' "$PLAN" | sed -E 's/^- Jira URL:\s*//g' || true)"
+          SUMMARY="$(grep -E '^- Story Summary:' "$PLAN" | sed -E 's/^- Story Summary:\s*//g' || true)"
+          RISK="$(grep -E '^- Risk Level:' "$PLAN" | sed -E 's/^- Risk Level:\s*//g' || true)"
+          IMPACTED="$(grep -E '^- Impacted Repositories:' "$PLAN" | sed -E 's/^- Impacted Repositories:\s*//g' || true)"
 
-          [ -n "$JIRA_URL" ] || JIRA_URL="https://vinipxf.atlassian.net/browse/${{ steps.ctx.outputs.jira_key }}"
+          if [ -z "$JIRA_URL" ]; then
+            JIRA_URL="https://vinipxf.atlassian.net/browse/${{ steps.ctx.outputs.jira_key }}"
+          fi
 
           echo "jira_url=$JIRA_URL" >> "$GITHUB_OUTPUT"
           echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
@@ -110,12 +112,13 @@ jobs:
           echo "impacted=$IMPACTED" >> "$GITHUB_OUTPUT"
 
       - name: Create implementation branch
-        if: steps.guard.outputs.already_done == 'false'
+        if: ${{ steps.guard.outputs.already_done == 'false' }}
         shell: bash
-        run: git checkout -b "${{ steps.ctx.outputs.impl_branch }}"
+        run: |
+          git checkout -b "${{ steps.ctx.outputs.impl_branch }}"
 
       - name: Repo-aware starter implementation changes
-        if: steps.guard.outputs.already_done == 'false'
+        if: ${{ steps.guard.outputs.already_done == 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -125,7 +128,7 @@ jobs:
 
           mkdir -p docs/implementation-results
 
-          cat > "docs/implementation-results/${SAFE}-implementation.md" << EOF
+          cat > "docs/implementation-results/${SAFE}-implementation.md" << 'EOF'
           # Implementation Result
 
           Jira Key: ${JIRA}
