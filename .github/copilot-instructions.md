@@ -1,30 +1,43 @@
-# Service Alpha — Copilot Agent Instructions
+# Copilot Agent Instructions — service-alpha
 
 ## Repository Purpose
-Primary Spring Boot 3.x RESTful microservice exposing User CRUD APIs. Depends on `common-library` for shared DTOs, utilities, and exception handling.
+`service-alpha` is a Spring Boot RESTful microservice responsible for CRUD APIs in the Alpha domain.
+It consumes shared utilities from `vinipx/common-library`.
 
-## Architecture
-- **Language**: Java 21
-- **Framework**: Spring Boot 3.2.x
-- **Build Tool**: Maven 3.9+
-- **Database**: H2 (dev/test), PostgreSQL (prod)
-- **Port**: 8081
+## Boundaries & Responsibilities
+- Owns Alpha domain REST endpoints, service layer, persistence adapters, and API contracts.
+- Must NOT duplicate reusable utilities that belong in `common-library`.
+- Any cross-cutting utility should be implemented in `common-library` and then consumed here.
 
-## Package Structure
-```
-com.ecosystem.alpha.config       → Spring configuration classes
-com.ecosystem.alpha.controller   → REST controllers (@RestController)
-com.ecosystem.alpha.service      → Business logic (@Service)
-com.ecosystem.alpha.repository   → Data access (@Repository, Spring Data JPA)
-com.ecosystem.alpha.model        → JPA entity classes (@Entity)
-```
+## Tech Stack
+- Java 21+
+- Spring Boot 3.x
+- Maven
+- JUnit 5, Mockito, Testcontainers (for integration tests)
 
-## Rules for Agents
-1. Follow the layered architecture strictly: Controller → Service → Repository.
-2. Controllers MUST only handle HTTP concerns (validation, status codes). No business logic.
-3. Services MUST be annotated with @Service and use constructor injection.
-4. All endpoints MUST return ResponseEntity<T> with appropriate HTTP status codes.
-5. Use common-library DTOs for API request/response — do NOT duplicate.
-6. All REST endpoints MUST have integration tests using @WebMvcTest or @SpringBootTest.
-7. Exception handling via @ControllerAdvice using common-library exception hierarchy.
-8. Minimum 80% test coverage.
+## Agent Operating Instructions
+1. Read linked Jira issue context before coding.
+2. Validate impact:
+   - Local impact (service-alpha)
+   - Shared impact (common-library)
+   - Downstream impact (service-beta if shared contract changes)
+3. Follow `java-coding-guidelines.md` strictly.
+4. Keep changes minimal, cohesive, and traceable to acceptance criteria.
+5. Generate:
+   - Unit tests for all new logic
+   - Integration tests for endpoint/data flow changes
+6. Update API docs/OpenAPI annotations if endpoint contract changes.
+7. Ensure backward compatibility unless Jira explicitly allows breaking changes.
+8. Produce clear commit messages referencing Jira key.
+9. Open PR with summary:
+   - Business context
+   - Technical changes
+   - Test evidence
+   - Risk/rollback notes
+
+## Definition of Done (Agent)
+- Build passes
+- Tests pass
+- Static checks pass
+- Acceptance criteria mapped to code + tests
+- PR created and ready for code owner review
