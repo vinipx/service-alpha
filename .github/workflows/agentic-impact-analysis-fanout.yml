@@ -98,8 +98,8 @@ jobs:
           TEXT: ${{ steps.jira.outputs.jira_full_text }}
           SUMMARY: ${{ steps.jira.outputs.jira_summary }}
           OVERRIDE: ${{ github.event.inputs.override_impacted_repositories }}
-          MIN_SCORE: ${{ github.event.inputs.minimum_score }}
-          FALLBACK_MODE: ${{ github.event.inputs.fallback_mode }}
+          MIN_SCORE: "2"
+          FALLBACK_MODE: "all"
         run: |
           set -euo pipefail
 
