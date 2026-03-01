@@ -1,0 +1,190 @@
+name: Jira Webhook Orchestrator (auto plan + fan-out)
+
+on:
+  repository_dispatch:
+    types: [jira_issue_event]
+  workflow_dispatch:
+    inputs:
+      jira_key:
+        description: "Jira key (e.g., AISDLC-1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout orchestrator repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Resolve jira key
+        id: key
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            JK="${{ github.event.inputs.jira_key }}"
+          else
+            JK="${{ github.event.client_payload.jira_key }}"
+          fi
+          [ -n "$JK" ] || { echo "jira_key missing"; exit 1; }
+          echo "jira_key=$JK" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch Jira issue
+        id: jira
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_KEY: ${{ steps.key.outputs.jira_key }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          API_URL="${JIRA_BASE_URL}/rest/api/3/issue/${JIRA_KEY}?fields=summary,description,labels,issuetype,priority,status"
+          RESPONSE=$(curl -sS -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" -H "Accept: application/json" "$API_URL")
+          echo "$RESPONSE" | jq -e '.key' >/dev/null || { echo "$RESPONSE"; exit 1; }
+
+          KEY=$(echo "$RESPONSE" | jq -r '.key')
+          SUMMARY=$(echo "$RESPONSE" | jq -r '.fields.summary // ""')
+          LABELS=$(echo "$RESPONSE" | jq -r '.fields.labels // [] | join(",")')
+          ITYPE=$(echo "$RESPONSE" | jq -r '.fields.issuetype.name // ""')
+          DESC=$(echo "$RESPONSE" | jq -r '.fields.description.content // [] | map(.content // []) | flatten | map(.text // empty) | join(" ")')
+          FULL="${SUMMARY} ${DESC}"
+
+          [ "$ITYPE" = "Story" ] || { echo "Only Story supported. got=$ITYPE"; exit 1; }
+          echo "$LABELS" | grep -qi "agentic-sdlc" || { echo "Missing label agentic-sdlc"; exit 1; }
+
+          echo "jira_key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "summary<<EOF" >> "$GITHUB_OUTPUT"; echo "$SUMMARY" >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "full<<EOF" >> "$GITHUB_OUTPUT"; echo "$FULL" >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "jira_url=${JIRA_BASE_URL}/browse/${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Impact analysis
+        id: impact
+        env:
+          TEXT: ${{ steps.jira.outputs.full }}
+          SUMMARY: ${{ steps.jira.outputs.summary }}
+          MIN_SCORE: "2"
+          FALLBACK_MODE: "all"
+        shell: bash
+        run: |
+          set -euo pipefail
+          TXT=$(echo "${TEXT} ${SUMMARY}" | tr '[:upper:]' '[:lower:]')
+
+          SA=0; SB=0; CL=0
+          echo "$TXT" | grep -Eqi 'common[-_ ]library|shared|reusable|validator|validation' && CL=$((CL+3))
+          echo "$TXT" | grep -Eqi 'email|format|normalize|sanitize|domain' && CL=$((CL+1))
+
+          echo "$TXT" | grep -Eqi 'service[-_ ]alpha|alpha api|controller|endpoint|request' && SA=$((SA+3))
+          echo "$TXT" | grep -Eqi 'ingress|rest|http' && SA=$((SA+1))
+
+          echo "$TXT" | grep -Eqi 'service[-_ ]beta|beta service|worker|processor|event|queue' && SB=$((SB+3))
+          echo "$TXT" | grep -Eqi 'consumer|downstream' && SB=$((SB+1))
+
+          OUT=()
+          [ "$SA" -ge "${MIN_SCORE}" ] && OUT+=("service-alpha")
+          [ "$SB" -ge "${MIN_SCORE}" ] && OUT+=("service-beta")
+          [ "$CL" -ge "${MIN_SCORE}" ] && OUT+=("common-library")
+
+          if [ ${#OUT[@]} -eq 0 ] && [ "${FALLBACK_MODE}" = "all" ]; then
+            OUT=("service-alpha" "service-beta" "common-library")
+          fi
+
+          IMPACTED=$(IFS=,; echo "${OUT[*]}")
+          echo "impacted=$IMPACTED" >> "$GITHUB_OUTPUT"
+
+      - name: Build per-repo plan payloads
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          JIRA="${{ steps.jira.outputs.jira_key }}"
+          SAFE=$(echo "$JIRA" | tr '[:upper:]' '[:lower:]')
+          JURL="${{ steps.jira.outputs.jira_url }}"
+          SUM="${{ steps.jira.outputs.summary }}"
+          IMP="${{ steps.impact.outputs.impacted }}"
+
+          mkdir -p out/plans
+          for repo in $(echo "$IMP" | tr ',' ' '); do
+            cat > "out/plans/${repo}.md" << EOF
+          # Implementation Plan
+
+          ## Metadata
+          - Jira Key: ${JIRA}
+          - Jira URL: ${JURL}
+          - Story Summary: ${SUM}
+          - Risk Level: medium
+          - Impacted Repositories: ${IMP}
+
+          ## Acceptance Criteria
+          - [ ] AC1: Implement requested behavior from Jira story
+          - [ ] AC2: Add/adjust tests for affected paths
+
+          ## Repository Tasks
+
+          ### Repo: ${repo}
+          - [ ] TASK-${repo}-001 | type=code | file=src/agentic/${SAFE}.txt | action=implement_story | details=Implement story logic for ${repo}
+          - [ ] TASK-${repo}-002 | type=test | file=test/agentic/${SAFE}.test.txt | action=add_tests | details=Add tests validating story behavior
+
+          ## Definition of Done
+          - [ ] Repo tasks completed
+          - [ ] Tests passing
+          - [ ] PR includes implementation report
+          EOF
+          done
+
+          echo "safe_jira=$SAFE" >> "$GITHUB_OUTPUT"
+
+      - name: Push plan files to impacted repos (create branch + PR)
+        uses: actions/github-script@v7
+        env:
+          OWNER: vinipx
+          TOKEN: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          IMPACTED: ${{ steps.impact.outputs.impacted }}
+          SAFE_JIRA: ${{ steps.plan.outputs.safe_jira }}
+        with:
+          github-token: ${{ secrets.ORG_DISPATCH_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const owner = process.env.OWNER;
+            const impacted = (process.env.IMPACTED || '').split(',').map(s=>s.trim()).filter(Boolean);
+            const safe = process.env.SAFE_JIRA;
+            const branch = `agentic-plan/${safe}-${context.runId}`;
+
+            for (const repo of impacted) {
+              const contentPath = `out/plans/${repo}.md`;
+              const content = fs.readFileSync(contentPath, 'utf8');
+              const b64 = Buffer.from(content, 'utf8').toString('base64');
+              const targetFile = `docs/implementation-plans/${safe}-plan.md`;
+
+              const main = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+
+              await github.rest.git.createRef({
+                owner, repo,
+                ref: `refs/heads/${branch}`,
+                sha: main.data.commit.sha
+              });
+
+              await github.rest.repos.createOrUpdateFileContents({
+                owner, repo,
+                path: targetFile,
+                message: `plan(${safe}): add implementation plan`,
+                content: b64,
+                branch
+              });
+
+              await github.rest.pulls.create({
+                owner, repo,
+                title: `[${safe.toUpperCase()}] Implementation plan`,
+                head: branch,
+                base: 'main',
+                body: `Auto-generated plan for ${safe.toUpperCase()}.`
+              });
+
+              core.info(`Plan PR created in ${owner}/${repo}`);
+            }
