@@ -138,6 +138,54 @@ jobs:
           Repository: ${REPO}
           EOF
 
+      - name: Build/Test
+        id: verify
+        shell: bash
+        run: |
+          set +e
+          mvn -B clean verify 2>&1 | tee .ci.log
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Auto-fix on CI failure (max 2 retries)
+        if: steps.verify.outputs.exit_code != '0'
+        shell: bash
+        env:
+          CI_LOG: .ci.log
+          MAX_RETRIES: "2"
+        run: |
+          set -euo pipefail
+          cat > .agent-instructions.md <<'EOF'
+          # Auto-fix Policy
+          - Read .ci.log and identify first compilation/test error.
+          - Apply minimal code change to fix root cause (not workaround).
+          - Prefer backward-compatible fixes in shared libraries.
+          - Update/add tests for the fix.
+          - Re-run build after each patch.
+          - Stop after MAX_RETRIES attempts and fail if still red.
+          EOF
+
+          n=1
+          until [ $n -gt "$MAX_RETRIES" ]; do
+            echo "Attempt $n/$MAX_RETRIES"
+
+            # TODO: invoke your coding agent here
+
+            set +e
+            mvn -B clean verify 2>&1 | tee .ci.log
+            ec=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$ec" -eq 0 ]; then
+              echo "CI recovered on attempt $n"
+              exit 0
+            fi
+            n=$((n+1))
+          done
+
+          echo "Auto-fix failed after $MAX_RETRIES attempts"
+          exit 1
+
       - name: Mark plan as DONE
         if: steps.guard.outputs.already_done == 'false'
         shell: bash
