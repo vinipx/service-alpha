@@ -159,7 +159,7 @@ jobs:
         with:
           script: |
             const jiraKey = `${{ github.event.inputs.jira_key }}`;
-            const jiraUrl = `${{ needs.plan.outputs.jira_url }}`;
+            const jiraUrl = `${{ needs.plan.outputs.jira_url }}` || `https://vinipxf.atlassian.net/browse/${jiraKey}`;
             const storySummary = `${{ needs.plan.outputs.story_summary }}`;
             const riskLevel = `${{ needs.plan.outputs.risk_level }}`;
             const impacted = `${{ github.event.inputs.impacted_repositories }}`;
