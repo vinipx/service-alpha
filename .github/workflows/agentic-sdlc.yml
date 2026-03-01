@@ -46,7 +46,7 @@ jobs:
         shell: bash
         run: |
           SAFE_JIRA=$(echo "${{ github.event.inputs.jira_key }}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
-          BRANCH="agentic/${SAFE_JIRA}"
+          BRANCH="agentic/${SAFE_JIRA}-${{ github.run_id }}"
           PLAN_FILE="docs/implementation-plans/${SAFE_JIRA}-plan.md"
           echo "branch_name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "plan_file=${PLAN_FILE}" >> "$GITHUB_OUTPUT"
